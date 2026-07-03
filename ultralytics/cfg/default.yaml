@@ -127,6 +127,11 @@ copy_paste_mode: flip # (str) copy-paste strategy for segmentation: flip or mixu
 auto_augment: randaugment # (str) classification auto augmentation policy: randaugment, autoaugment, augmix
 erasing: 0.4 # (float) random erasing probability for classification (0.0–1.0)
 
+# Contrastive learning (SimCLR-style NT-Xent, joint with detection loss) ---------------------------------------------
+contrastive: False # (bool) enable joint contrastive + detection training
+contrastive_weight: 0.1 # (float) NT-Xent loss weight (Total = det_loss + contrastive_weight * NT-Xent)
+temperature: 0.5 # (float) NT-Xent temperature
+
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) path to a config.yaml that overrides defaults
 

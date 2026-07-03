@@ -134,7 +134,38 @@ class DetectionTrainer(BaseTrainer):
                 ]  # new shape (stretched to gs-multiple)
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
+        if getattr(self.args, "contrastive", False):
+            batch["img_view2"], batch["bboxes_view2"] = self._contrastive_augment(batch["img"], batch.get("bboxes"))
         return batch
+
+    @staticmethod
+    def _contrastive_augment(
+        imgs: torch.Tensor, bboxes: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply independent random augmentations to create a second contrastive view and matching box coordinates."""
+        imgs2 = imgs.clone()
+        b = imgs2.shape[0]
+        device = imgs2.device
+        flipped = False
+        if random.random() < 0.5:
+            imgs2 = torch.flip(imgs2, dims=[3])
+            flipped = True
+        brightness = 1.0 + (torch.rand(b, 1, 1, 1, device=device) - 0.5) * 0.8
+        contrast = 0.8 + torch.rand(b, 1, 1, 1, device=device) * 0.4
+        mean = imgs2.mean(dim=(1, 2, 3), keepdim=True)
+        imgs2 = (imgs2 * brightness).clamp(0, 1)
+        imgs2 = ((imgs2 - mean) * contrast + mean).clamp(0, 1)
+        saturation = 0.8 + torch.rand(b, 1, 1, 1, device=device) * 0.4
+        gray = imgs2.mean(dim=1, keepdim=True).expand_as(imgs2)
+        imgs2 = (imgs2 * saturation + gray * (1.0 - saturation)).clamp(0, 1)
+
+        if bboxes is None:
+            return imgs2, None
+
+        bboxes2 = bboxes.clone().to(device=device)
+        if flipped and bboxes2.ndim == 2 and bboxes2.shape[1] == 4:
+            bboxes2[:, 0] = 1.0 - bboxes2[:, 0]
+        return imgs2, bboxes2
 
     def set_model_attributes(self):
         """Set model attributes based on dataset information."""
@@ -145,6 +176,9 @@ class DetectionTrainer(BaseTrainer):
         self.model.nc = self.data["nc"]  # attach number of classes to model
         self.model.names = self.data["names"]  # attach class names to model
         self.model.args = self.args  # attach hyperparameters to model
+        if getattr(self.args, "contrastive", False):
+            unwrap_model(self.model).init_contrastive_modules()
+            self.loss_names = ("box_loss", "cls_loss", "dfl_loss", "contrastive_loss")
         if getattr(self.model, "end2end", False):
             self.model.set_head_attr(max_det=self.args.max_det)
 
@@ -194,7 +228,10 @@ class DetectionTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        if getattr(self.args, "contrastive", False):
+            self.loss_names = ("box_loss", "cls_loss", "dfl_loss", "contrastive_loss")
+        else:
+            self.loss_names = ("box_loss", "cls_loss", "dfl_loss")
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )

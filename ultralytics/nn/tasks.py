@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
@@ -99,6 +100,8 @@ from ultralytics.utils.torch_utils import (
     smart_inference_mode,
     time_sync,
 )
+from ultralytics.nn.modules.contrastive import ProjectionHead
+from ultralytics.utils.contrastive_loss import NTXentLoss
 
 
 class BaseModel(torch.nn.Module):
@@ -518,6 +521,125 @@ class DetectionModel(BaseModel):
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return E2ELoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+
+    @property
+    def backbone_end_idx(self) -> int:
+        """Index of the deepest backbone layer (last entry in model YAML backbone section)."""
+        return len(self.yaml["backbone"]) - 1
+
+    def _extract_backbone_feature(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the backbone and return the deepest feature map before the FPN head."""
+        y = []
+        for m in self.model:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+            if m.i == self.backbone_end_idx:
+                return x
+        raise RuntimeError(f"Backbone end layer index {self.backbone_end_idx} not found during forward pass.")
+
+    def init_contrastive_modules(self):
+        """Lazily initialize projection head and NT-Xent loss when contrastive training is enabled."""
+        if getattr(self, "projection_head", None) is not None:
+            return
+        args = getattr(self, "args", None)
+        temperature = getattr(args, "temperature", 0.5) if args else 0.5
+        device = next(self.parameters()).device
+        ch = self.yaml.get("channels", 3)
+        with torch.no_grad():
+            feat = self._extract_backbone_feature(torch.zeros(1, ch, 256, 256, device=device))
+        self.projection_head = ProjectionHead(in_channels=feat.shape[1]).to(device)
+        self.contrastive_criterion = NTXentLoss(temperature=temperature).to(device)
+        LOGGER.info(
+            f"Contrastive learning enabled: backbone layer {self.backbone_end_idx}, "
+            f"channels={feat.shape[1]}, temperature={temperature}, "
+            f"weight={getattr(args, 'contrastive_weight', 0.1)}"
+        )
+
+    def _extract_object_level_embeddings(self, x: torch.Tensor, bboxes: torch.Tensor, batch_idx: torch.Tensor):
+        """Extract object-level embeddings from backbone features using GT boxes and the existing projection head."""
+        if bboxes is None or bboxes.numel() == 0:
+            return None
+
+        feat_map = self._extract_backbone_feature(x)
+        device = feat_map.device
+        bboxes = bboxes.to(device=device)
+        batch_idx = batch_idx.to(device=device, dtype=torch.long)
+
+        if bboxes.ndim != 2 or bboxes.shape[1] != 4:
+            return None
+        if batch_idx.numel() != bboxes.shape[0]:
+            return None
+
+        img_h, img_w = x.shape[-2:]
+        feat_h, feat_w = feat_map.shape[-2:]
+        roi_embeddings = []
+
+        for img_idx in range(x.shape[0]):
+            obj_mask = batch_idx == img_idx
+            if not obj_mask.any():
+                continue
+
+            boxes = bboxes[obj_mask]
+            feat_i = feat_map[img_idx : img_idx + 1]
+            for box in boxes:
+                x_center, y_center, box_w, box_h = [float(v) for v in box.tolist()]
+                x1 = int(round(max(0.0, (x_center - box_w / 2.0) * feat_w)))
+                y1 = int(round(max(0.0, (y_center - box_h / 2.0) * feat_h)))
+                x2 = int(round(min(float(feat_w), (x_center + box_w / 2.0) * feat_w)))
+                y2 = int(round(min(float(feat_h), (y_center + box_h / 2.0) * feat_h)))
+
+                if x2 <= x1 or y2 <= y1:
+                    roi = torch.zeros((1, feat_i.shape[1], 1, 1), device=device, dtype=feat_i.dtype)
+                else:
+                    roi = feat_i[:, :, y1:y2, x1:x2]
+                    if roi.numel() == 0:
+                        roi = torch.zeros((1, feat_i.shape[1], 1, 1), device=device, dtype=feat_i.dtype)
+                    else:
+                        roi = F.adaptive_avg_pool2d(roi, (1, 1))
+
+                roi_embeddings.append(roi)
+
+        if not roi_embeddings:
+            return None
+
+        embeddings = torch.cat(roi_embeddings, dim=0)
+        if self.training and getattr(self, "args", None) is not None and getattr(self.args, "contrastive", False):
+            LOGGER.info(f"Object-level contrastive ROI count: {embeddings.shape[0]} features extracted")
+        return self.projection_head(embeddings)
+
+    def loss(self, batch, preds=None):
+        """Compute detection loss, optionally adding NT-Xent contrastive loss during training."""
+        if getattr(self, "criterion", None) is None:
+            self.criterion = self.init_criterion()
+
+        if preds is None:
+            preds = self.forward(batch["img"])
+
+        det_loss, det_loss_items = self.criterion(preds, batch)
+        args = getattr(self, "args", None)
+        if not args or not getattr(args, "contrastive", False):
+            return det_loss, det_loss_items
+        if not self.training:
+            zero = torch.zeros(1, device=det_loss_items.device)
+            return det_loss, torch.cat([det_loss_items, zero])
+
+        self.init_contrastive_modules()
+        bboxes1 = batch.get("bboxes")
+        bboxes2 = batch.get("bboxes_view2", bboxes1)
+        z1 = self._extract_object_level_embeddings(batch["img"], bboxes1, batch["batch_idx"])
+        z2 = self._extract_object_level_embeddings(batch["img_view2"], bboxes2, batch["batch_idx"])
+
+        if z1 is None or z2 is None or z1.shape[0] != z2.shape[0]:
+            contrastive_loss = torch.zeros(1, device=det_loss.device, dtype=det_loss.dtype)
+        else:
+            contrastive_loss = self.contrastive_criterion(z1, z2)
+
+        weighted = args.contrastive_weight * contrastive_loss * batch["img"].shape[0]
+        total_loss = torch.cat([det_loss, weighted.reshape(1)])
+        loss_items = torch.cat([det_loss_items, contrastive_loss.detach().reshape(1)])
+        return total_loss, loss_items
 
 
 class OBBModel(DetectionModel):

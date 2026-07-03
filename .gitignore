@@ -1,3 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# PyTorch / training outputs
+runs/
+weights/
+logs/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

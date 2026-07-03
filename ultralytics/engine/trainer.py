@@ -281,6 +281,15 @@ class BaseTrainer:
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
+        # Ensure contrastive projection head (if enabled) is created and registered
+        # before optimizer construction so its parameters are included in optim.param_groups.
+        if getattr(self.args, "contrastive", False):
+            try:
+                unwrap_model(self.model).init_contrastive_modules()
+            except Exception:
+                # best-effort: don't fail optimizer construction if init fails here
+                LOGGER.debug("Contrastive module init before optimizer failed; continuing.")
+
         self.optimizer = self.build_optimizer(
             model=self.model,
             name=self.args.optimizer,
