@@ -4,9 +4,7 @@ import torch.nn.functional as F
 
 
 class NTXentLoss(nn.Module):
-    """
-    Normalized Temperature-scaled Cross Entropy Loss
-    (SimCLR InfoNCE Loss)
+    """Normalized Temperature-scaled Cross Entropy Loss (SimCLR InfoNCE Loss).
     """
 
     def __init__(self, temperature=0.5):
@@ -14,11 +12,8 @@ class NTXentLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, z1, z2):
+        """z1 : (B,128) z2 : (B,128).
         """
-        z1 : (B,128)
-        z2 : (B,128)
-        """
-
         batch_size = z1.size(0)
 
         z1 = F.normalize(z1, dim=1)
@@ -26,26 +21,16 @@ class NTXentLoss(nn.Module):
 
         representations = torch.cat([z1, z2], dim=0)
 
-        similarity_matrix = F.cosine_similarity(
-            representations.unsqueeze(1),
-            representations.unsqueeze(0),
-            dim=2
-        )
+        similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
 
         mask = torch.eye(2 * batch_size, dtype=torch.bool).to(z1.device)
         similarity_matrix = similarity_matrix.masked_fill(mask, -9e15)
 
-        positives = torch.cat([
-            torch.diag(similarity_matrix, batch_size),
-            torch.diag(similarity_matrix, -batch_size)
-        ])
+        positives = torch.cat([torch.diag(similarity_matrix, batch_size), torch.diag(similarity_matrix, -batch_size)])
 
         numerator = torch.exp(positives / self.temperature)
 
-        denominator = torch.sum(
-            torch.exp(similarity_matrix / self.temperature),
-            dim=1
-        )
+        denominator = torch.sum(torch.exp(similarity_matrix / self.temperature), dim=1)
 
         loss = -torch.log(numerator / denominator)
 
