@@ -75,8 +75,10 @@ from ultralytics.nn.modules import (
     YOLOESegment26,
     v10Detect,
 )
+from ultralytics.nn.modules.contrastive import ProjectionHead
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, SAFE_LOAD, SETTINGS, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import REMOTE_FILE_PREFIXES, check_file, check_requirements, check_suffix, check_yaml
+from ultralytics.utils.contrastive_loss import NTXentLoss
 from ultralytics.utils.loss import (
     E2ELoss,
     PoseLoss26,
@@ -100,8 +102,6 @@ from ultralytics.utils.torch_utils import (
     smart_inference_mode,
     time_sync,
 )
-from ultralytics.nn.modules.contrastive import ProjectionHead
-from ultralytics.utils.contrastive_loss import NTXentLoss
 
 
 class BaseModel(torch.nn.Module):
@@ -572,7 +572,7 @@ class DetectionModel(BaseModel):
         if batch_idx.numel() != bboxes.shape[0]:
             return None
 
-        img_h, img_w = x.shape[-2:]
+        _img_h, _img_w = x.shape[-2:]
         feat_h, feat_w = feat_map.shape[-2:]
         roi_embeddings = []
 
@@ -585,10 +585,10 @@ class DetectionModel(BaseModel):
             feat_i = feat_map[img_idx : img_idx + 1]
             for box in boxes:
                 x_center, y_center, box_w, box_h = [float(v) for v in box.tolist()]
-                x1 = int(round(max(0.0, (x_center - box_w / 2.0) * feat_w)))
-                y1 = int(round(max(0.0, (y_center - box_h / 2.0) * feat_h)))
-                x2 = int(round(min(float(feat_w), (x_center + box_w / 2.0) * feat_w)))
-                y2 = int(round(min(float(feat_h), (y_center + box_h / 2.0) * feat_h)))
+                x1 = round(max(0.0, (x_center - box_w / 2.0) * feat_w))
+                y1 = round(max(0.0, (y_center - box_h / 2.0) * feat_h))
+                x2 = round(min(float(feat_w), (x_center + box_w / 2.0) * feat_w))
+                y2 = round(min(float(feat_h), (y_center + box_h / 2.0) * feat_h))
 
                 if x2 <= x1 or y2 <= y1:
                     roi = torch.zeros((1, feat_i.shape[1], 1, 1), device=device, dtype=feat_i.dtype)
