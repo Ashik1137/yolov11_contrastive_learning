@@ -1,11 +1,10 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 
 class ProjectionHead(nn.Module):
-    """
-    Projection head for contrastive learning.
+    """Projection head for contrastive learning.
 
     Input:
         Feature map from YOLO backbone
@@ -22,9 +21,7 @@ class ProjectionHead(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.projector = nn.Sequential(
-            nn.Linear(in_channels, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, out_dim)
+            nn.Linear(in_channels, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim)
         )
 
     def forward(self, x):
